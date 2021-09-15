@@ -1434,7 +1434,8 @@ class Report(models.Model):
         if superexpert_annotations.count() > 0:
             cumulative_score = 0
             for ano in superexpert_annotations:
-                cumulative_score += ano.validation_value
+                if ano.validation_value is not None:
+                    cumulative_score += ano.validation_value
             mean_score = cumulative_score/float(superexpert_annotations.count())
         else:
             cumulative_score = 0
