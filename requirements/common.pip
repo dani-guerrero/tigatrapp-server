@@ -80,7 +80,7 @@ pyfcm==1.5.1
 Pygments==2.2.0
 pyheif==0.5.1
 pyparsing==2.4.7
-pyproj==1.9.5.1
+pyproj #==1.9.5.1
 python-dateutil==2.8.1
 python-geohash==0.8.5
 python-slugify==4.0.1
@@ -92,8 +92,8 @@ redis==2.10.3
 requests==2.18.1
 rsa==4.7.2
 scandir==1.5
-scikit-learn==0.21.3
-scipy==1.1.0
+scikit-learn #==0.21.3
+scipy #==1.1.0
 simplegeneric==0.8.1
 simplejson==3.17.2
 six==1.16.0
