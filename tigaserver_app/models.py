@@ -317,6 +317,8 @@ class EuropeCountry(models.Model):
     x_max = models.FloatField(blank=True, null=True)
     y_min = models.FloatField(blank=True, null=True)
     y_max = models.FloatField(blank=True, null=True)
+    is_bounding_box = models.BooleanField(default=False, help_text='If true, this geometry acts as a bounding box. The bounding boxes act as little separate entolabs, in the sense that no reports located inside a bounding box should reach an expert outside this bounding box')
+    national_supervisor_report_expires_in = models.IntegerField(default=14, help_text='Number of days that a report in the queue is exclusively available to the nagional supervisor. For example, if the field value is 6, after report_creation_time + 6 days a report will be available to all users')
     objects = GeoManager()
 
     class Meta:
@@ -804,7 +806,7 @@ class Report(models.Model):
 
     def get_is_deleted(self):
         result = False
-        all_versions = Report.objects.filter(report_id=self.report_id).order_by('version_number')
+        all_versions = Report.objects.filter(report_id=self.report_id).filter(type=self.type).filter(user=self.user).order_by('version_number')
         if all_versions[0].version_number == -1:
             result = True
         return result
@@ -819,10 +821,10 @@ class Report(models.Model):
     def get_is_latest(self):
         if self.version_number == -1:
             return False
-        elif Report.objects.filter(report_id=self.report_id).filter(type=self.type).count() == 1:
+        elif Report.objects.filter(report_id=self.report_id).filter(type=self.type).filter(user=self.user).count() == 1:
             return True
         else:
-            all_versions = Report.objects.filter(report_id=self.report_id).filter(type=self.type).order_by('version_number')
+            all_versions = Report.objects.filter(report_id=self.report_id).filter(type=self.type).filter(user=self.user).order_by('version_number')
             if all_versions[0].version_number == -1:
                 return False
             elif all_versions.reverse()[0].version_number == self.version_number:
