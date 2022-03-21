@@ -51,6 +51,7 @@ from django.db.models.expressions import RawSQL
 import functools
 import operator
 import math
+from tigacrafting.report_queues import get_crisis_report_available_reports
 
 #----------Metadades fotos----------#
 
@@ -61,6 +62,7 @@ from tigaserver_project.settings import *
 from rest_framework.response import Response
 import re
 from tigacrafting.report_queues import assign_reports, get_base_adults_qs
+from django.utils import timezone
 
 #-----------------------------------#
 
@@ -984,28 +986,43 @@ def pending_reports_heatmap_data():
     return raw_data
 
 
+def update_pending_data(country):
+    data = get_crisis_report_available_reports(country)
+    country.pending_crisis_reports = data.count()
+    country.last_crisis_report_n_update = timezone.now()
+    country.save()
+
+
+def get_cached_country_pending_crisis_reports(country):
+    if country.pending_crisis_reports is None or country.last_crisis_report_n_update is None:
+        update_pending_data(country)
+    elif country.last_crisis_report_n_update is not None:
+        try:
+            last_country_validation_activity = ExpertReportAnnotation.objects.filter(report__country=country).latest('created').created
+            if country.last_crisis_report_n_update < last_country_validation_activity:
+                update_pending_data(country)
+        except ExpertReportAnnotation.DoesNotExist:
+            country.pending_crisis_reports
+    return country.pending_crisis_reports
+
+
 def pending_reports_by_country():
     country_qs = EuropeCountry.objects.exclude(is_bounding_box=True)
     data = {}
     for country in country_qs:
-        is_supervised_country = UserStat.objects.filter(national_supervisor_of=country).exists()
-        if is_supervised_country:
-            # exclude reports reserved for supervisor
-            current_progress_country = get_base_adults_qs().annotate(n_annotations=Count('expert_report_annotations')).filter(n_annotations__lt=3).filter(country=country)
-            if country.national_supervisor_report_expires_in is None:
-                expiration_period_days = 14
-            else:
-                expiration_period_days = country.national_supervisor_report_expires_in
-            current_progress_country = current_progress_country.exclude( Q(country=country) & Q(server_upload_time__gte=datetime.now() - timedelta(days=expiration_period_days)) )
-        else:
-            current_progress_country = get_base_adults_qs().annotate(n_annotations=Count('expert_report_annotations')).filter(n_annotations__lt=3).filter(country=country)
-        data[country.gid]={"n":current_progress_country.count(), "x":country.geom.centroid.x, "y":country.geom.centroid.y, "name":country.name_engl }
+        available_reports_country = get_cached_country_pending_crisis_reports(country)
+        data[country.gid] = {"n": available_reports_country, "x": country.geom.centroid.x, "y": country.geom.centroid.y, "name": country.name_engl}
     return data
 
 
+@login_required
 def expert_geo_report_assign(request):
+    this_user = request.user
+    #if this_user.userstat.crisis_mode:
     count_data = pending_reports_by_country()
     return render(request, 'tigacrafting/geo_report_assign.html', { 'count_data': json.dumps(count_data) })
+    #else:
+        #return HttpResponse("You don't have emergency mode permissions, so you can't see this page. Please contact your administrator.")
 
 
 def executive_auto_validate(annotation, request):
@@ -1141,32 +1158,37 @@ def expert_report_annotation(request, scroll_position='', tasks_per_page='10', n
         '''
 
         if loc == 'spain':
-            hidden_final_reports_superexpert = set(ExpertReportAnnotation.objects.filter(user__groups__name='superexpert', validation_complete=True,revise=True, status=-1).filter(Q(report__country__isnull=True) | Q(report__country__gid=17)).values_list('report', flat=True))
-            flagged_final_reports_superexpert = set(ExpertReportAnnotation.objects.filter(user__groups__name='superexpert', validation_complete=True,revise=True, status=0).filter(Q(report__country__isnull=True) | Q(report__country__gid=17)).exclude(report__version_UUID__in=hidden_final_reports_superexpert).values_list('report', flat=True))
-            public_final_reports_superexpert = set(ExpertReportAnnotation.objects.filter(user__groups__name='superexpert', validation_complete=True,revise=True, status=1).filter(Q(report__country__isnull=True) | Q(report__country__gid=17)).exclude(report__version_UUID__in=hidden_final_reports_superexpert).exclude(report__version_UUID__in=flagged_final_reports_superexpert).values_list('report', flat=True))
-            hidden_final_reports_expert = set(ExpertReportAnnotation.objects.filter(user__groups__name='expert', validation_complete=True, status=-1).exclude(report__version_UUID__in=public_final_reports_superexpert).exclude(report__version_UUID__in=flagged_final_reports_superexpert).filter(Q(report__country__isnull=True) | Q(report__country__gid=17)).values_list('report', flat=True))
-            flagged_final_reports_expert = set(ExpertReportAnnotation.objects.filter(user__groups__name='expert', validation_complete=True, status=0).exclude(report__version_UUID__in=public_final_reports_superexpert).exclude(report__version_UUID__in=hidden_final_reports_superexpert).filter(Q(report__country__isnull=True) | Q(report__country__gid=17)).values_list('report', flat=True))
-            public_final_reports_expert = set(ExpertReportAnnotation.objects.filter(user__groups__name='expert', validation_complete=True, status=1).exclude(report__version_UUID__in=flagged_final_reports_superexpert).exclude(report__version_UUID__in=hidden_final_reports_superexpert).filter(Q(report__country__isnull=True) | Q(report__country__gid=17)).values_list('report', flat=True))
+            hidden_final_reports_superexpert = ExpertReportAnnotation.objects.filter(user__groups__name='superexpert', validation_complete=True,revise=True, status=-1).filter(Q(report__country__isnull=True) | Q(report__country__gid=17)).values_list('report', flat=True).distinct()
+            flagged_final_reports_superexpert = ExpertReportAnnotation.objects.filter(user__groups__name='superexpert', validation_complete=True,revise=True, status=0).filter(Q(report__country__isnull=True) | Q(report__country__gid=17)).exclude(report__version_UUID__in=hidden_final_reports_superexpert).values_list('report', flat=True).distinct()
+            public_final_reports_superexpert = ExpertReportAnnotation.objects.filter(user__groups__name='superexpert', validation_complete=True,revise=True, status=1).filter(Q(report__country__isnull=True) | Q(report__country__gid=17)).exclude(report__version_UUID__in=hidden_final_reports_superexpert).exclude(report__version_UUID__in=flagged_final_reports_superexpert).values_list('report', flat=True).distinct()
+            hidden_final_reports_expert = ExpertReportAnnotation.objects.filter(user__groups__name='expert', validation_complete=True, status=-1).exclude(report__version_UUID__in=public_final_reports_superexpert).exclude(report__version_UUID__in=flagged_final_reports_superexpert).filter(Q(report__country__isnull=True) | Q(report__country__gid=17)).values_list('report', flat=True).distinct()
+            flagged_final_reports_expert = ExpertReportAnnotation.objects.filter(user__groups__name='expert', validation_complete=True, status=0).exclude(report__version_UUID__in=public_final_reports_superexpert).exclude(report__version_UUID__in=hidden_final_reports_superexpert).filter(Q(report__country__isnull=True) | Q(report__country__gid=17)).values_list('report', flat=True).distinct()
+            public_final_reports_expert = ExpertReportAnnotation.objects.filter(user__groups__name='expert', validation_complete=True, status=1).exclude(report__version_UUID__in=flagged_final_reports_superexpert).exclude(report__version_UUID__in=hidden_final_reports_superexpert).filter(Q(report__country__isnull=True) | Q(report__country__gid=17)).values_list('report', flat=True).distinct()
         elif loc == 'europe':
-            hidden_final_reports_superexpert = set(ExpertReportAnnotation.objects.filter(user__groups__name='superexpert', validation_complete=True,revise=True, status=-1).filter(Q(report__country__isnull=False) & ~Q(report__country__gid=17)).values_list('report', flat=True))
-            flagged_final_reports_superexpert = set(ExpertReportAnnotation.objects.filter(user__groups__name='superexpert', validation_complete=True,revise=True, status=0).filter(Q(report__country__isnull=False) & ~Q(report__country__gid=17)).exclude(report__version_UUID__in=hidden_final_reports_superexpert).values_list('report', flat=True))
-            public_final_reports_superexpert = set(ExpertReportAnnotation.objects.filter(user__groups__name='superexpert', validation_complete=True,revise=True, status=1).filter(Q(report__country__isnull=False) & ~Q(report__country__gid=17)).exclude(report__version_UUID__in=hidden_final_reports_superexpert).exclude(report__version_UUID__in=flagged_final_reports_superexpert).values_list('report', flat=True))
-            hidden_final_reports_expert = set(ExpertReportAnnotation.objects.filter(user__groups__name='expert', validation_complete=True,status=-1).exclude(report__version_UUID__in=public_final_reports_superexpert).exclude(report__version_UUID__in=flagged_final_reports_superexpert).filter(Q(report__country__isnull=False) & ~Q(report__country__gid=17)).values_list('report', flat=True))
-            flagged_final_reports_expert = set(ExpertReportAnnotation.objects.filter(user__groups__name='expert', validation_complete=True,status=0).exclude(report__version_UUID__in=public_final_reports_superexpert).exclude(report__version_UUID__in=hidden_final_reports_superexpert).filter(Q(report__country__isnull=False) & ~Q(report__country__gid=17)).values_list('report', flat=True))
-            public_final_reports_expert = set(ExpertReportAnnotation.objects.filter(user__groups__name='expert', validation_complete=True,status=1).exclude(report__version_UUID__in=flagged_final_reports_superexpert).exclude(report__version_UUID__in=hidden_final_reports_superexpert).filter(Q(report__country__isnull=False) & ~Q(report__country__gid=17)).values_list('report', flat=True))
+            hidden_final_reports_superexpert = ExpertReportAnnotation.objects.filter(user__groups__name='superexpert', validation_complete=True,revise=True, status=-1).filter(Q(report__country__isnull=False) & ~Q(report__country__gid=17)).values_list('report', flat=True).distinct()
+            flagged_final_reports_superexpert = ExpertReportAnnotation.objects.filter(user__groups__name='superexpert', validation_complete=True,revise=True, status=0).filter(Q(report__country__isnull=False) & ~Q(report__country__gid=17)).exclude(report__version_UUID__in=hidden_final_reports_superexpert).values_list('report', flat=True).distinct()
+            public_final_reports_superexpert = ExpertReportAnnotation.objects.filter(user__groups__name='superexpert', validation_complete=True,revise=True, status=1).filter(Q(report__country__isnull=False) & ~Q(report__country__gid=17)).exclude(report__version_UUID__in=hidden_final_reports_superexpert).exclude(report__version_UUID__in=flagged_final_reports_superexpert).values_list('report', flat=True).distinct()
+            hidden_final_reports_expert = ExpertReportAnnotation.objects.filter(user__groups__name='expert', validation_complete=True,status=-1).exclude(report__version_UUID__in=public_final_reports_superexpert).exclude(report__version_UUID__in=flagged_final_reports_superexpert).filter(Q(report__country__isnull=False) & ~Q(report__country__gid=17)).values_list('report', flat=True).distinct()
+            flagged_final_reports_expert = ExpertReportAnnotation.objects.filter(user__groups__name='expert', validation_complete=True,status=0).exclude(report__version_UUID__in=public_final_reports_superexpert).exclude(report__version_UUID__in=hidden_final_reports_superexpert).filter(Q(report__country__isnull=False) & ~Q(report__country__gid=17)).values_list('report', flat=True).distinct()
+            public_final_reports_expert = ExpertReportAnnotation.objects.filter(user__groups__name='expert', validation_complete=True,status=1).exclude(report__version_UUID__in=flagged_final_reports_superexpert).exclude(report__version_UUID__in=hidden_final_reports_superexpert).filter(Q(report__country__isnull=False) & ~Q(report__country__gid=17)).values_list('report', flat=True).distinct()
         else:
-            hidden_final_reports_superexpert = set(ExpertReportAnnotation.objects.filter(user__groups__name='superexpert', validation_complete=True,revise=True, status=-1).values_list('report', flat=True))
-            flagged_final_reports_superexpert = set(ExpertReportAnnotation.objects.filter(user__groups__name='superexpert', validation_complete=True,revise=True, status=0).exclude(report__version_UUID__in=hidden_final_reports_superexpert).values_list('report', flat=True))
-            public_final_reports_superexpert = set(ExpertReportAnnotation.objects.filter(user__groups__name='superexpert', validation_complete=True,revise=True, status=1).exclude(report__version_UUID__in=hidden_final_reports_superexpert).exclude(report__version_UUID__in=flagged_final_reports_superexpert).values_list('report', flat=True))
-            hidden_final_reports_expert = set(ExpertReportAnnotation.objects.filter(user__groups__name='expert', validation_complete=True, status=-1).exclude(report__version_UUID__in=public_final_reports_superexpert).exclude(report__version_UUID__in=flagged_final_reports_superexpert).values_list('report', flat=True))
-            flagged_final_reports_expert = set(ExpertReportAnnotation.objects.filter(user__groups__name='expert', validation_complete=True, status=0).exclude(report__version_UUID__in=public_final_reports_superexpert).exclude(report__version_UUID__in=hidden_final_reports_superexpert).values_list('report', flat=True))
-            public_final_reports_expert = set(ExpertReportAnnotation.objects.filter(user__groups__name='expert', validation_complete=True, status=1).exclude(report__version_UUID__in=flagged_final_reports_superexpert).exclude(report__version_UUID__in=hidden_final_reports_superexpert).values_list('report', flat=True))
+            hidden_final_reports_superexpert = ExpertReportAnnotation.objects.filter(user__groups__name='superexpert', validation_complete=True,revise=True, status=-1).values_list('report', flat=True).distinct()
+            flagged_final_reports_superexpert = ExpertReportAnnotation.objects.filter(user__groups__name='superexpert', validation_complete=True,revise=True, status=0).exclude(report__version_UUID__in=hidden_final_reports_superexpert).values_list('report', flat=True).distinct()
+            public_final_reports_superexpert = ExpertReportAnnotation.objects.filter(user__groups__name='superexpert', validation_complete=True,revise=True, status=1).exclude(report__version_UUID__in=hidden_final_reports_superexpert).exclude(report__version_UUID__in=flagged_final_reports_superexpert).values_list('report', flat=True).distinct()
+            hidden_final_reports_expert = ExpertReportAnnotation.objects.filter(user__groups__name='expert', validation_complete=True,status=-1).exclude(report__version_UUID__in=public_final_reports_superexpert).exclude(report__version_UUID__in=flagged_final_reports_superexpert).values_list('report', flat=True).distinct()
+            flagged_final_reports_expert = ExpertReportAnnotation.objects.filter(user__groups__name='expert', validation_complete=True,status=0).exclude(report__version_UUID__in=public_final_reports_superexpert).exclude(report__version_UUID__in=hidden_final_reports_superexpert).values_list('report', flat=True).distinct()
+            public_final_reports_expert = ExpertReportAnnotation.objects.filter(user__groups__name='expert', validation_complete=True,status=1).exclude(report__version_UUID__in=flagged_final_reports_superexpert).exclude(report__version_UUID__in=hidden_final_reports_superexpert).values_list('report', flat=True).distinct()
 
-        hidden_final_reports = set(list(hidden_final_reports_superexpert) + list(hidden_final_reports_expert))
-        flagged_final_reports = set(list(flagged_final_reports_superexpert) + list(flagged_final_reports_expert))
-        public_final_reports = set(list(public_final_reports_superexpert) + list(public_final_reports_expert))
+        # hidden_final_reports = set(list(hidden_final_reports_superexpert) + list(hidden_final_reports_expert))
+        # flagged_final_reports = set(list(flagged_final_reports_superexpert) + list(flagged_final_reports_expert))
+        # public_final_reports = set(list(public_final_reports_superexpert) + list(public_final_reports_expert))
+        hidden_final_reports = hidden_final_reports_superexpert | hidden_final_reports_expert
+        flagged_final_reports = flagged_final_reports_superexpert | flagged_final_reports_expert
+        public_final_reports = public_final_reports_superexpert | public_final_reports_expert
 
         if load_new_reports == 'T':
+            assign_reports(this_user)
+        elif this_user_is_superexpert:
             assign_reports(this_user)
 
         # if this_user_is_expert and load_new_reports == 'T':
@@ -1808,11 +1830,14 @@ def picture_validation(request,tasks_per_page='10',visibility='visible', usr_not
         #
         # new_reports_unfiltered = list(new_reports_unfiltered)
 
-        report_id_deleted_reports = Report.objects.filter(version_UUID__in=RawSQL("select \"version_UUID\" from tigaserver_app_report r, (select report_id, user_id, count(\"version_UUID\") from tigaserver_app_report where type = 'adult' and report_id in (select distinct report_id from tigaserver_app_report where version_number = -1) group by report_id, user_id having count(\"version_UUID\") >1) as deleted where r.report_id = deleted.report_id and r.user_id = deleted.user_id",())).values("report_id").distinct()
+        #report_id_deleted_reports = Report.objects.filter(version_UUID__in=RawSQL("select \"version_UUID\" from tigaserver_app_report r, (select report_id, user_id, count(\"version_UUID\") from tigaserver_app_report where type = 'adult' and report_id in (select distinct report_id from tigaserver_app_report where version_number = -1) group by report_id, user_id having count(\"version_UUID\") >1) as deleted where r.report_id = deleted.report_id and r.user_id = deleted.user_id",())).values("report_id").distinct()
+        report_id_deleted_reports_adults = Report.objects.filter(version_UUID__in=RawSQL("select \"version_UUID\" from tigaserver_app_report r, (select report_id, user_id, count(\"version_UUID\") from tigaserver_app_report where type = 'adult' and report_id in (select distinct report_id from tigaserver_app_report where version_number = -1) group by report_id, user_id having count(\"version_UUID\") >1) as deleted where r.report_id = deleted.report_id and r.user_id = deleted.user_id",())).values("version_UUID").distinct()
+        report_id_deleted_reports_sites = Report.objects.filter(version_UUID__in=RawSQL("select \"version_UUID\" from tigaserver_app_report r, (select report_id, user_id, count(\"version_UUID\") from tigaserver_app_report where type = 'site' and report_id in (select distinct report_id from tigaserver_app_report where version_number = -1) group by report_id, user_id having count(\"version_UUID\") >1) as deleted where r.report_id = deleted.report_id and r.user_id = deleted.user_id",())).values("version_UUID").distinct()
 
-        new_reports_unfiltered = new_reports_unfiltered.exclude(version_UUID__in=report_id_deleted_reports)
+        new_reports_unfiltered = new_reports_unfiltered.exclude(version_UUID__in=report_id_deleted_reports_adults).exclude(version_UUID__in=report_id_deleted_reports_sites)
 
-        new_reports_unfiltered = new_reports_unfiltered.filter(version_UUID__in=RawSQL("select \"version_UUID\" from tigaserver_app_report r,(select report_id, max(version_number) as higher from tigaserver_app_report group by report_id) maxes where r.report_id = maxes.report_id and r.version_number = maxes.higher",()))
+        new_reports_unfiltered = new_reports_unfiltered.filter(version_UUID__in=RawSQL("select \"version_UUID\" from tigaserver_app_report r,(select report_id,max(version_number) as higher from tigaserver_app_report where type = 'adult' group by report_id) maxes where r.type = 'adult' and r.report_id = maxes.report_id and r.version_number = maxes.higher union select \"version_UUID\" from tigaserver_app_report r, (select report_id,max(version_number) as higher from tigaserver_app_report where type = 'site' group by report_id) maxes where r.type = 'site' and r.report_id = maxes.report_id and r.version_number = maxes.higher",()))
+        #new_reports_unfiltered = new_reports_unfiltered.filter(version_UUID__in=RawSQL("select \"version_UUID\" from tigaserver_app_report r,(select report_id,max(version_number) as higher from tigaserver_app_report where type = 'adult' group by report_id) maxes where r.type = 'adult' and r.report_id = maxes.report_id and r.version_number = maxes.higher union select \"version_UUID\" from tigaserver_app_report r, (select report_id, user_id, version_number, count(\"version_UUID\") from tigaserver_app_report where type = 'adult' group by report_id, user_id, version_number having count(\"version_UUID\") = 1) as uniq where r.report_id = uniq.report_id and r.user_id = uniq.user_id and r.version_number = uniq.version_number union select \"version_UUID\" from tigaserver_app_report r,(select report_id,max(version_number) as higher from tigaserver_app_report where type = 'site' group by report_id) maxes where r.type = 'site' and r.report_id = maxes.report_id and r.version_number = maxes.higher union select \"version_UUID\" from tigaserver_app_report r, (select report_id, user_id, version_number, count(\"version_UUID\") from tigaserver_app_report where type = 'site' group by report_id, user_id, version_number having count(\"version_UUID\") = 1) as uniq where r.report_id = uniq.report_id and r.user_id = uniq.user_id and r.version_number = uniq.version_number",()))
 
         # for r in new_reports_unfiltered:
         #      print("{0} {1} {2}".format(r.version_UUID, r.deleted, r.latest_version))
